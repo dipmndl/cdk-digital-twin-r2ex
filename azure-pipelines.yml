@@ -1,0 +1,245 @@
+trigger:
+  - main
+  
+pool:
+    vmImage: 'ubuntu-latest'
+
+variables:
+  AWS_DEFAULT_REGION: 'ap-south-1'
+  # general
+  CDK_ENV_NAME: 'r2ex'
+  CDK_ENV_REGION: 'ap-south-1'
+  CDK_ENV_ACCOUNT: '932780615243'
+  VPC_ID: 'vpc-0ce08f60eba542855'
+  PRIVATE_SUBNETS_IDS: 'subnet-0cac1c0fa6aec3b5a, subnet-02a6f16ebd006cb9d'
+  # cicd-stack
+  CUSTOM_ACTIONS_PROVIDER_NAME: 'EC2-CodePipeline-Builder-R2EX'
+  CUSTOM_ACTIONS_PROVIDER_VERSION: '1'
+  CUSTOM_ACTIONS_PROVIDER_CATEGORY: 'Build'
+  SOURCE_REPO: 'digital-twin-r2ex-demo'
+  SOURCE_BRANCH: 'main'
+  PIPELINE_TIMEOUT: '180'
+  # state machine stack 
+  CDK_ENV_OS: 'linux'
+  # sqs stack 
+  SQS_TIMEOUT: '30'
+  SQS_RETENSION: '1'
+  SQS_MAX_SIZE: '1024'
+  SQS_VARIANTS: 'r2ex'
+  # event stack
+  LAMBDA_TIMEOUT: '30'
+  REPO_NAME: 'sa8295p-hqx-4-2-4-0_hlos_dev_la'
+  REPO_ID: 'edb95534-f659-4b6b-9fb4-e5221dd496e4'
+  REPO_ARN: 'arn:aws:codecommit:ap-south-1:932780615243:sa8295p-hqx-4-2-4-0_hlos_dev_l'
+  BRANCH_KEY: 'wip,release'
+  PIPELINE_NAME: 'R2EX-Pipeline-digital-twin-demo'
+  PIPELINE_NAME_ARN: 'arn:aws:codepipeline:ap-south-1:932780615243:R2EX-Pipeline-digital-twin-demo'
+  CC_RECIPIENT_EMAIL: 'dipendu.mondal@marelli.com,venkatesh.s@marelli.com,,mohammed.aamirp@marelli.com,giacomo.pastore@marelli.com,uriti.nagakishore@marelli.com'
+  S3_BUCKET: 'dtdj-soc-build-artifact-storage'
+  SECRET_MANAGER_ARN_GRAPH_API: 'arn:aws:secretsmanager:ap-south-1:932780615243:secret:MSGraphAPI_Credentials-NJL8Xh'
+  SENDER_EMAIL: 'noreply-DevOps@marelli.com'
+
+
+stages:
+- stage: Build_and_Synth
+  jobs: 
+    - job: Synthesize
+      steps:
+        - checkout: self
+          displayName: 'Checkout Code'
+        
+        # Reference the env-template.yml here
+        - template: env-template.yml
+
+        - script: |
+            echo "Install Node.js"
+            curl -sL https://deb.nodesource.com/setup_14.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+          displayName: 'Install Node.js'  
+
+        - script: |
+            echo "Install AWS CDK CLI"
+            npm install -g aws-cdk
+          displayName: 'Install AWS CDK CLI'
+
+        - script: |
+            echo "Checking directory structure"
+            ls -ltr $(Build.SourcesDirectory)
+          displayName: 'List Directory Structure'
+
+        - script: |
+            echo "Configuring AWS Account via CLI"
+            aws configure set aws_access_key_id $(AWS_ACCESS_KEY_ID)
+            aws configure set aws_secret_access_key $(AWS_SECRET_ACCESS_KEY)
+            aws configure set default.region $(AWS_DEFAULT_REGION)
+          displayName: 'Configure AWS Account via CLI'
+
+        - script: |
+            echo "Synthesize CDK Template"
+            python3 -m venv .venv
+            source .venv/bin/activate
+            python -m pip install --upgrade pip
+            echo "install dependencies"
+            pip install -r requirements.txt
+            echo "Synthesize AWS CDK stack"
+            cdk synth
+          displayName: 'Synthesize CDK Template'
+
+- stage: Test
+  dependsOn: Build_and_Synth
+  condition: succeeded()
+  jobs:
+      - job: Unit_Test
+        pool:
+            vmImage: 'ubuntu-latest'
+        steps:
+          - task: UsePythonVersion@0
+          - checkout: self
+          # Reference the env-template.yml here
+          - template: env-template.yml
+          - script: |
+              echo "Install Node.js"
+              curl -sL https://deb.nodesource.com/setup_14.x | sudo -E bash -
+              sudo apt-get install -y nodejs
+              echo "Install AWS CDK CLI"
+              npm install -g aws-cdk
+              echo "Checking directory structure"
+              ls -ltr $(Build.SourcesDirectory)
+              echo "Configuring AWS Account via CLI"
+              aws configure set aws_access_key_id $(AWS_ACCESS_KEY_ID)
+              aws configure set aws_secret_access_key $(AWS_SECRET_ACCESS_KEY)
+              aws configure set default.region $(AWS_DEFAULT_REGION)
+              python3 -m venv .venv
+              source .venv/bin/activate
+              python -m pip install --upgrade pip
+              echo "install dependencies"
+              pip install -r requirements.txt
+              pip install -r requirements-test.txt
+              echo "Synthesize AWS CDK stack"
+              cdk synth
+              pytest --cov=tests --junitxml=test-results.xml --cov-branch --cov-report xml:coverage.xml --cov-report html:coverage_html
+            displayName: 'Testing CDK Template and Collect Reports'
+
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '**/test-results.xml'
+            displayName: 'Publish Test Results'
+
+          - task: PublishCodeCoverageResults@1
+            condition: succeededOrFailed()
+            inputs:
+              codeCoverageTool: 'Cobertura'
+              summaryFileLocation: '**/coverage.xml'
+            displayName: 'Publish Code Coverage'
+           
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: 'coverage_html'
+              artifactName: 'CodeCoverageHTML'
+            displayName: 'Publish Code Coverage HTML Report'
+
+- stage: StaticCodeAnalysis
+  dependsOn: Test
+  condition: succeeded()
+  pool:
+    vmImage: 'ubuntu-latest'
+  jobs:
+    - job: CheckovAnalysis
+      steps:
+      - checkout: self
+        displayName: 'Checkout Code'
+      
+      # Reference inside the script step
+      - template: env-template.yml
+      - script: |
+            echo "Creating virtual environment"
+            curl -sL https://deb.nodesource.com/setup_14.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+            echo "Install AWS CDK CLI"
+            npm install -g aws-cdk
+            echo "Checking directory structure"
+            ls -ltr $(Build.SourcesDirectory)
+            echo "Configuring AWS Account via CLI"
+            aws configure set aws_access_key_id $(AWS_ACCESS_KEY_ID)
+            aws configure set aws_secret_access_key $(AWS_SECRET_ACCESS_KEY)
+            aws configure set default.region $(AWS_DEFAULT_REGION)
+            python3 -m venv .venv
+            source .venv/bin/activate
+            python -m pip install --upgrade pip
+            echo "install dependencies"
+            pip install -r requirements.txt
+            echo "Installing Checkov using requirements-sca.txt---"
+            pip install -r requirements-sca.txt
+        displayName: 'Install Checkov'
+
+      - bash: |
+          pip install checkov
+          echo "checkov version"
+          check -v
+          chmod +x scripts/checkov-scripts.sh
+          scripts/checkov-scripts.sh
+        displayName: 'Run Checkov Static Code Analysis'
+
+      - task: PublishTestResults@2
+        condition: succeededOrFailed() 
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: 'checkov_report/checkov-report.xml'
+        displayName: 'Publish Checkov Analysis Results'
+      
+      - task: PublishBuildArtifacts@1
+        condition: succeededOrFailed()
+        inputs:
+          pathToPublish: 'checkov_report/results_cli.txt'
+          artifactName: 'CheckovPlainTextReport'
+          publishLocation: 'Container'
+        displayName: 'Publish Checkov Plain Text Report'
+      
+      - task: PublishBuildArtifacts@1
+        condition: succeededOrFailed()
+        inputs:
+          pathToPublish: 'checkov_report/'
+          artifactName: 'CheckovReports'
+          publishLocation: 'Container'
+        displayName: 'Publish Checkov Reports'
+
+- stage: Deploy
+  dependsOn: StaticCodeAnalysis
+  condition: succeeded()
+  jobs:
+    - deployment: DeployInfrastructure
+      displayName: 'Deploy Stage'
+      pool:
+          vmImage: 'ubuntu-latest'
+      environment:
+        name: 'CDK_STACK_APPROVAL'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - checkout: self
+              # Reference the env-template.yml here
+              - template: env-template.yml
+              - script: |
+                  echo "Install Node.js"
+                  curl -sL https://deb.nodesource.com/setup_14.x | sudo -E bash -
+                  sudo apt-get install -y nodejs
+                  echo "Install AWS CDK CLI"
+                  npm install -g aws-cdk
+                  echo "Checking directory structure"
+                  ls -ltr $(Build.SourcesDirectory)
+                  echo "Configuring AWS Account via CLI"
+                  aws configure set aws_access_key_id $(AWS_ACCESS_KEY_ID)
+                  aws configure set aws_secret_access_key $(AWS_SECRET_ACCESS_KEY)
+                  aws configure set default.region $(AWS_DEFAULT_REGION)
+                  python3 -m venv .venv
+                  source .venv/bin/activate
+                  python -m pip install --upgrade pip
+                  echo "install dependencies"
+                  pip install -r requirements.txt
+                  echo "Synthesize AWS CDK stack"
+                  cdk synth
+                  cdk deploy --require-approval never
+                displayName: 'CDK Deploy'

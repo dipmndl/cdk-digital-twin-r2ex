@@ -1,0 +1,193 @@
+{
+  "Comment": "An example of the Amazon States Language that runs an AWS Batch job and monitors the job until it completes.",
+  "StartAt": "Acquire Builder Flow",
+  "States": {
+    "Acquire Builder Flow": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Start EC2 Instance",
+          "States": {
+            "Start EC2 Instance": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:EC2-dtdj-mcu-cicd-Instance-api",
+              "InputPath": "$.params.instance",
+              "ResultPath": "$.status.instance",
+              "Parameters": {
+                "command": "start",
+                "imageId.$": "$.imageId",
+                "instanceType.$": "$.instanceType",
+                "keyName.$": "$.keyName"
+              },
+              "Next": "Wait Start"
+            },
+            "Wait Start": {
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "Check Builder Start Status"
+            },
+            "Check Builder Start Status": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:EC2-dtdj-mcu-cicd-Instance-api",
+              "InputPath": "$.status.instance",
+              "ResultPath": "$.status.instance",
+              "Parameters": {
+                "command": "status_ssm",
+                "instanceId.$": "$.instanceId"
+              },
+              "Next": "Builder Started?"
+            },
+            "Builder Started?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.status.instance.status",
+                  "StringEquals": "STARTED",
+                  "Next": "Started"
+                },
+                {
+                  "Variable": "$.status.instance.status",
+                  "StringEquals": "STOPPED",
+                  "Next": "Failed to Start"
+                }
+              ],
+              "Default": "Wait Start"
+            },
+            "Started": {
+              "Type": "Pass",
+              "End": true
+            },
+            "Failed to Start": {
+              "Type": "Fail",
+              "Error": "StartError",
+              "Cause": "EC2 instance failed to start."
+            }
+          }
+        }
+      ],
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.errorDetails",
+          "Next": "Report Completion"
+        }
+      ],
+      "OutputPath": "$[0]",
+      "Next": "Run Command Flow"
+    },
+    "Run Command Flow": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Start Command Execution",
+          "States": {
+            "Start Command Execution": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:EC2-dtdj-mcu-cicd-Job-api",
+              "ResultPath": "$.status.command",
+              "Parameters": {
+                "command": "run",
+                "instanceId.$": "$.status.instance.instanceId",
+                "commandText.$": "$.params.command.commandText",
+                "workingDirectory.$": "$.params.command.workingDirectory",
+                "timeout.$": "$.params.command.timeout",
+                "inputBucketName.$": "$.params.artifacts.input.bucketName",
+                "inputObjectKey.$": "$.params.artifacts.input.objectKey",
+                "outputArtifactPath.$": "$.params.artifacts.output.path",
+                "outputBucketName.$": "$.params.artifacts.output.bucketName",
+                "outputObjectKey.$": "$.params.artifacts.output.objectKey",
+                "executionId.$": "$.params.pipeline.executionId",
+                "pipelineArn.$": "$.params.pipeline.arn",
+                "pipelineName.$": "$.params.pipeline.name"
+              },
+              "Next": "Wait Command Completion"
+            },
+            "Wait Command Completion": {
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "Check Command Status"
+            },
+            "Check Command Status": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:EC2-dtdj-mcu-cicd-Job-api",
+              "ResultPath": "$.status.command",
+              "Parameters": {
+                "command": "status",
+                "instanceId.$": "$.status.instance.instanceId",
+                "commandId.$": "$.status.command.commandId"
+              },
+              "Next": "Command Completed?"
+            },
+            "Command Completed?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.status.command.status",
+                  "StringEquals": "SUCCESS",
+                  "Next": "Completed"
+                },
+                {
+                  "Variable": "$.status.command.status",
+                  "StringEquals": "FAILED",
+                  "Next": "Failed to Complete"
+                }
+              ],
+              "Default": "Wait Command Completion"
+            },
+            "Completed": {
+              "Type": "Pass",
+              "End": true
+            },
+            "Failed to Complete": {
+              "Type": "Fail",
+              "Error": "RunCommandError",
+              "Cause": "SSM command completed with failures."
+            }
+          }
+        }
+      ],
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.errorDetails",
+          "Next": "Report Completion"
+        }
+      ],
+      "OutputPath": "$[0]",
+      "Next": "Report Completion"
+    },
+    "Report Completion": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:REGION:ACCOUNT_ID:function:EC2-dtdj-mcu-cicd-job-completion-handler",
+      "End": true
+    }
+  }
+}
